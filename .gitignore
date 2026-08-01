@@ -1,0 +1,11 @@
+# 运行时日志（由 server.py 生成，非源码）
+missing.log
+missing_api.log
+*.log
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本仓库为纯前端离线包，不含 node_modules / .workbuddy

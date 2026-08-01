@@ -1,0 +1,1 @@
+(self.webpackChunkvirtuallab=self.webpackChunkvirtuallab||[]).push([[3785],{13785:function(r,u,t){"use strict";t.r(u),t.d(u,{other_import:function(){return s}});var n=t(33659);let s=class{constructor(l){(0,n.r)(this,l)}}}}]);
