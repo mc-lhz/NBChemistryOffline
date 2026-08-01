@@ -1,0 +1,1 @@
+{"type":"sprite","x":0,"y":0,"name":"","0":{"x":3,"y":2,"name":"ani","type":"nbMovie","r":0,"sx":1,"sy":1,"a":1,"skewX":0,"skewY":0,"0":{"index":1,"0":{"type":"bitmap","libName":"01.png 复制","x":-364,"y":-318,"r":0,"sx":1,"sy":1,"skewX":0,"skewY":0}},"1":{"index":1,"0":{"type":"bitmap","libName":"02.png","x":-364,"y":-318,"r":0,"sx":1,"sy":1,"skewX":0,"skewY":0}}}}
