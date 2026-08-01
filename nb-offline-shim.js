@@ -1,7 +1,10 @@
 /* ===========================================================
- * NB 化学实验室 — 离线运行垫片 (shim) v1
- * 目标：只保留“做实验”，把 登录/激活/VIP/作业/统计/上报 全部本地假装成功
- * 加载时机：nb-config.js 之后、其余脚本之前
+ * NB 化学实验室 — 离线运行垫片 (shim) v2  [noserver 版]
+ * 目标：只保留“做实验”，把 登录/激活/VIP/作业/统计/上报 全部本地假装成功。
+ * 与 v1 的区别：彻底移除对 server.py 的依赖 —— 所有接口拦截、假数据、以及
+ *   内容类接口的“录制回放”全部在浏览器内完成，页面变为纯静态，可用任意静态
+ *   服务器（python -m http.server / nginx / GitHub Pages…）托管，无需自定义后端。
+ * 加载时机：nb-config.js 之后、其余脚本之前（nb-fixtures.js 需在它之前加载）。
  * =========================================================== */
 (function () {
   'use strict';
@@ -9,41 +12,24 @@
   var LOG = true;
   var HITS = [];          // 被拦截的请求，window.__nbShimHits 可查
   window.__nbShimHits = HITS;
+  var MISSING = [];       // 内容类接口无内嵌数据时的缺失清单，window.__nb_missing 可查
+  window.__nb_missing = MISSING;
 
   function log() {
     if (LOG) console.log.apply(console, ['%c[shim]', 'color:#0a7'].concat([].slice.call(arguments)));
   }
+  function noop() { }
 
-  /* ---------- 1. 把所有远端域名指向本地占位，避免真的发起外网请求 ---------- */
-  var LOCAL = location.origin;
+  /* ---------- 1. 不再改写 API 域名为 /__nbapi，保留真实跨域 URL ----------
+   * 拦截发生在下面的 fetch / XHR 钩子里：所有跨域请求都会被合成响应，
+   * 因此不再需要把地址改写为本地占位、也不再需要 server.py 的 /__nbapi、/__nbpx。
+   * 仅把 cookieDomain 收敛为当前 host，避免跨域 cookie 写不进去。 */
   var cfg = window.__nb_config || (window.__nb_config = { api: {} });
   cfg.api = cfg.api || {};
-
-  // 快照：保存每个 key 对应的【真实远端 URL】，供 RECORD/REPLAY 代理还原
-  // （下面会把它们压平成 /__nbapi/<key>，不存这份映射就再也拿不到真地址了）
-  window.__nb_realapi = {};
-  (function snapshot() {
-    Object.keys(cfg.api).forEach(function (k) {
-      var v = cfg.api[k];
-      if (typeof v === 'string' && /^https?:\/\//.test(v)) window.__nb_realapi[k] = v;
-    });
-    if (cfg.api.u5 && cfg.api.u5.baseUrl) window.__nb_realapi['u5'] = cfg.api.u5.baseUrl;
-  })();
-
-  Object.keys(cfg.api).forEach(function (k) {
-    if (typeof cfg.api[k] === 'string' && /^https?:\/\//.test(cfg.api[k])) {
-      cfg.api[k] = LOCAL + '/__nbapi/' + k;
-    }
-  });
-  if (cfg.api.u5) cfg.api.u5.baseUrl = LOCAL + '/__nbapi/u5';
-  window.__nb_domain = {
-    userLoginApi: LOCAL + '/__nbapi/login',
-    passportUrl: LOCAL + '/__nbapi/passport',
-    baseUrl: LOCAL,
-    accountUrl: LOCAL + '/__nbapi/account',
-    cookieDomain: location.hostname
-  };
-  // 关掉埋点 / 调研 / sentry
+  if (window.__nb_domain) {
+    try { window.__nb_domain.cookieDomain = location.hostname; } catch (e) { }
+  }
+  // 关掉埋点 / 调研 / sentry（与 v1 一致）
   window.__nb_sensors = { enabled: '', showlog: '', tenantName: 'nobook', project: 'offline' };
   window.__nb_howxm = { appId: '' };
   window.__nb_sentry = { enabled: '' };
@@ -58,22 +44,22 @@
     if (!/[?&]auth_key=/.test(url)) {
       var sep = url.indexOf('?') >= 0 ? '&' : '?';
       var fakeAuth = '21-offline' + Date.now().toString(36);
-      try { history.replaceState(null, '', url + sep + 'auth_key=' + encodeURIComponent(fakeAuth)); } catch(e) {}
+      try { history.replaceState(null, '', url + sep + 'auth_key=' + encodeURIComponent(fakeAuth)); } catch (e) { }
       log('URL 注入 auth_key=' + fakeAuth);
     }
 
-    // B) hook location.search（umi 内部可能从这里读 query）
+    // B) hook location.href（umi 内部可能从这里读 query）
     try {
       var origSearchDesc = Object.getOwnPropertyDescriptor(location, 'search')
         || Object.getOwnPropertyDescriptor(HTMLLocation.prototype, 'search');
       if (origSearchDesc && origSearchDesc.get) {
         var origGet = origSearchDesc.get;
         Object.defineProperty(location, 'search', {
-          get: function() { var s = origGet.call(this); return /[?&]auth_key=/.test(s) ? s : s + (s ? '&' : '?') + 'auth_key=21-offline'; },
+          get: function () { var s = origGet.call(this); return /[?&]auth_key=/.test(s) ? s : s + (s ? '&' : '?') + 'auth_key=21-offline'; },
           configurable: true
         });
       }
-    } catch(e) {}
+    } catch (e) { }
 
     // C) 延迟直接 dispatch Redux —— 最可靠方案，不依赖路由时序
     // 等待 dva app 初始化后，模拟 parseAuthKeyFromURL 成功后的行为：
@@ -96,10 +82,10 @@
         store.dispatch({ type: 'sdkModel/updateState', payload: {
           canDIY: true, canRes: true, gradeId: 3,
           forceHDVOnMobile: false, noNBSetDataOfURL: false
-        }});
+        } });
         store.dispatch({ type: 'appModel/switchGrade', payload: 3 });
         log('✅ 已直接 dispatch sdkModel 状态 (gradeId=3 高中化学 DIY=Res=true)');
-      } catch(e) {
+      } catch (e) {
         log('dispatch 待重试: ' + e.message); setTimeout(tryDispatch, 1000);
       }
     }, 2000);  // 等 2s 让 dva app 先初始化
@@ -161,64 +147,72 @@
     return ok({});
   }
 
-  /* ---------- 3.5 RECORD/REPLAY 代理（server.py 的 /__nbpx 负责落盘/回放） ---------- */
-  // 哪些请求仍走本地假数据（不代理、不录制）：登录 / VIP / 激活 / 上报 / 时间 等会话类。
-  // 这样本地假 VIP 态不会被真实（可能非 VIP）响应覆盖，离线壳照常“已登录/已激活”。
+  /* ---------- 3.5 内嵌接口数据（取代 server.py 的 /__nbpx RECORD/REPLAY） ----------
+   * 数据源：window.__nb_fixtures（由 nb-fixtures.js 定义，默认空）。
+   *   录制方式：在带 server.py 的 Offline 分支用 --record 抓真响应，再编译进 nb-fixtures.js。
+   *   未录制时：内容类接口返回空 ok({})，页面照常运行（试剂/容器列表为空）。
+   * 易变 query 参数（时间戳/随机数/签名）不参与匹配键，避免永远 miss。 */
+  var VOLATILE_QS = {
+    '_': 1, 't': 1, 'ts': 1, 'time': 1, 'timestamp': 1, 'rand': 1, 'random': 1,
+    'nonce': 1, 'sign': 1, 'signature': 1, 'auth_key': 1, 'token': 1, '_t': 1,
+    'cb': 1, 'callback': 1, 'r': 1
+  };
+
+  function normalizeUrl(url) {
+    try {
+      var u = new URL(url, location.href);
+      var entries = [];
+      u.SearchParams.forEach(function (v, k) { entries.push([k, v]); });
+      entries = entries.filter(function (kv) { return !VOLATILE_QS[kv[0].toLowerCase()]; });
+      entries.sort(function (a, b) { return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0); });
+      var q = entries.map(function (kv) { return encodeURIComponent(kv[0]) + '=' + encodeURIComponent(kv[1]); }).join('&');
+      return u.origin + u.pathname + (q ? '?' + q : '');
+    } catch (e) {
+      return String(url);
+    }
+  }
+
+  function fxStrictKey(method, url) {
+    return (method || 'GET').toUpperCase() + ' ' + normalizeUrl(url);
+  }
+  function fxLooseKey(method, url) {
+    try {
+      var u = new URL(url, location.href);
+      return (method || 'GET').toUpperCase() + ' ' + u.origin + u.pathname;
+    } catch (e) {
+      return (method || 'GET').toUpperCase() + ' ' + url;
+    }
+  }
+
+  function lookupFixture(method, url) {
+    var fx = window.__nb_fixtures || {};
+    var strict = fxStrictKey(method, url);
+    if (fx[strict]) return fx[strict];
+    var loose = fxLooseKey(method, url) + '?';
+    var keys = Object.keys(fx);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf(loose) === 0) return fx[keys[i]];
+    }
+    return null;
+  }
+
+  var _missSeen = {};
+  function recordMissing(via, url) {
+    var tag = via + ' ' + url;
+    if (_missSeen[tag]) return;
+    _missSeen[tag] = 1;
+    MISSING.push({ via: via, url: url });
+    log('无内嵌数据 →', url, '（返回空 ok，查看 window.__nb_missing）');
+  }
+
+  /* ---------- 4. 哪些请求仍走本地假数据（不查 fixtures）：登录 / VIP / 激活 / 上报 / 时间 等会话类。
+   * 这样本地假 VIP 态不会被真实（可能非 VIP）响应覆盖，离线壳照常“已登录/已激活”。 ---------- */
   function shouldMock(url) {
     return /login|passport|checkLogin|userInfo|user_info|getUser|account|vip|limit|权限|auth|permission|purchase|order|pay|activate|active|offline|serverTime|time|homework|task|report|record|save|upload|log|track|stat|sensors|howxm/i.test(String(url));
   }
 
-  // 把离线的 /__nbapi/<key><rest> 还原成真实远端 URL。
-  // 例：/__nbapi/storageUrl/experiment/v1/Play?x=1
-  //     → https://storage-backend.nobook.com/experiment/v1/Play?x=1
-  function resolveReal(url) {
-    var u = String(url);
-    if (u.indexOf('/__nbapi/') < 0) return null;
-    var qi = u.indexOf('?');
-    var query = qi >= 0 ? u.slice(qi) : '';
-    var pathOnly = qi >= 0 ? u.slice(0, qi) : u;
-    var keys = Object.keys(window.__nb_realapi || {});
-    var best = null, bestLen = -1;
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i], prefix = '/__nbapi/' + k;
-      if (pathOnly === prefix || pathOnly.indexOf(prefix + '/') === 0) {
-        if (k.length > bestLen) { best = k; bestLen = k.length; }
-      }
-    }
-    if (!best) return null;
-    var rest = pathOnly.slice(('/__nbapi/' + best).length);
-    return window.__nb_realapi[best] + rest + query;
-  }
-
-  function serializeHeaders(h) {
-    var out = {};
-    if (!h) return out;
-    if (typeof h.forEach === 'function') {
-      try { h.forEach(function (v, k) { out[k] = v; }); } catch (e) { }
-    } else if (typeof h === 'object') {
-      Object.keys(h).forEach(function (k) { out[k] = h[k]; });
-    }
-    return out;
-  }
-
-  // 统一通过本地 server.py 的 /__nbpx 代理：
-  //   RECORD 模式 → 拉真实源站并落盘；REPLAY 模式（默认离线）→ 回放已录响应。
-  function proxyRequest(realUrl, method, body, headers) {
-    return fetch('/__nbpx', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url: realUrl,
-        method: method || 'GET',
-        body: body == null ? '' : String(body),
-        headers: serializeHeaders(headers)
-      })
-    });
-  }
-
   function isLocalAsset(url) {
     var u = String(url);
-    if (u.indexOf('/__nbapi/') >= 0) return false;
     if (/^(blob:|data:)/.test(u)) return true;
     // 相对路径或同源 → 当作静态资源放行
     if (!/^https?:\/\//.test(u)) return true;
@@ -227,26 +221,37 @@
     } catch (e) { return false; }
   }
 
-  /* ---------- 4. 拦 fetch ---------- */
+  /* ---------- 5. 拦 fetch（合成响应，绝不触网） ---------- */
   var rawFetch = window.fetch ? window.fetch.bind(window) : null;
   window.fetch = function (input, init) {
     var url = typeof input === 'string' ? input : (input && input.url) || '';
     if (isLocalAsset(url)) return rawFetch(input, init);
     HITS.push({ via: 'fetch', url: url });
     log('fetch →', url);
-    var real = resolveReal(url);
-    if (!real && /^https?:\/\//.test(url)) real = url; // 直接代理硬编码的真实 URL
-    if (real && !shouldMock(url)) {
-      log('proxy →', real);
-      return proxyRequest(real, init && init.method, init && init.body, init && init.headers);
+    init = init || {};
+
+    if (shouldMock(url)) {
+      var b = JSON.stringify(mockFor(url));
+      return Promise.resolve(new Response(b, { status: 200, headers: { 'Content-Type': 'application/json' } }));
     }
-    var body = JSON.stringify(mockFor(url));
-    return Promise.resolve(new Response(body, {
+
+    // 内容类请求：命中内嵌数据则回放，否则空 ok
+    var meta = lookupFixture(init.method, url);
+    if (meta) {
+      var body = (typeof meta.body === 'object') ? JSON.stringify(meta.body) : String(meta.body == null ? '{}' : meta.body);
+      log('fixture →', url);
+      return Promise.resolve(new Response(body, {
+        status: meta.status || 200,
+        headers: { 'Content-Type': (meta.contentType || 'application/json') }
+      }));
+    }
+    recordMissing('fetch', url);
+    return Promise.resolve(new Response(JSON.stringify(ok({})), {
       status: 200, headers: { 'Content-Type': 'application/json' }
     }));
   };
 
-  /* ---------- 5. 拦 XHR（原型补丁，保留原生对象，不破坏 responseType/事件） ---------- */
+  /* ---------- 6. 拦 XHR（原型补丁，保留原生对象，不破坏 responseType/事件） ---------- */
   var XP = XMLHttpRequest.prototype;
   var rawOpen = XP.open, rawSend = XP.send;
   var rawSetHeader = XP.setRequestHeader;
@@ -272,27 +277,39 @@
   };
   XP.getAllResponseHeaders = function () {
     if (!this.__nbMock) return rawGetAll.apply(this, arguments);
-    return 'content-type: application/json\r\n';
+    return 'content-type: ' + (this.__nbCt || 'application/json') + '\r\n';
   };
   XP.getResponseHeader = function (h) {
     if (!this.__nbMock) return rawGetOne.apply(this, arguments);
-    return /content-type/i.test(h) ? 'application/json' : null;
+    return /content-type/i.test(h) ? (this.__nbCt || 'application/json') : null;
   };
-  function respondXHR(self, text) {
-    self.__nbUrl = self.__nbUrl || '';
+
+  // 统一合成响应：text 为响应体字符串；opts 可携带 contentType / status / b64（二进制 base64）
+  function respondXHR(self, text, opts) {
+    opts = opts || {};
+    var ct = opts.contentType || 'application/json';
     var rt = self.responseType;
-    if (rt === 'json') {
+    self.__nbCt = ct;
+    if (opts.b64 && /^(arraybuffer|blob|)$/.test(rt)) {
+      var bin = atob(text);
+      var u8 = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      var buf = u8.buffer;
+      if (rt === 'blob') freeze(self, 'response', new Blob([buf], { type: ct }));
+      else freeze(self, 'response', buf);
+      freeze(self, 'responseText', '');
+    } else if (rt === 'json') {
       try { freeze(self, 'response', JSON.parse(text)); } catch (e) { freeze(self, 'response', text); }
     } else if (rt === 'arraybuffer') {
       freeze(self, 'response', new TextEncoder().encode(text).buffer);
     } else if (rt === 'blob') {
-      freeze(self, 'response', new Blob([text], { type: 'application/json' }));
+      freeze(self, 'response', new Blob([text], { type: ct }));
     } else {
       freeze(self, 'responseText', text);
       freeze(self, 'response', text);
     }
     freeze(self, 'readyState', 4);
-    freeze(self, 'status', 200);
+    freeze(self, 'status', opts.status || 200);
     freeze(self, 'statusText', 'OK');
     freeze(self, 'responseURL', self.__nbUrl);
     try { if (self.onreadystatechange) self.onreadystatechange(new Event('readystatechange')); } catch (e) { }
@@ -306,30 +323,23 @@
   XP.send = function (bodyArg) {
     if (!this.__nbMock) return rawSend.apply(this, arguments);
     var self = this;
-    var real = resolveReal(self.__nbUrl);
-    if (!real && /^https?:\/\//.test(self.__nbUrl)) real = self.__nbUrl; // 直接代理硬编码真实 URL
-    if (real && !shouldMock(self.__nbUrl)) {
-      log('proxy →', real);
-      proxyRequest(real, self.__nbMethod, bodyArg, self.__nbHeaders)
-        .then(function (r) { return r.text(); })
-        .then(function (text) { respondXHR(self, text); })
-        .catch(function () { respondXHR(self, JSON.stringify(mockFor(self.__nbUrl))); });
+
+    if (shouldMock(self.__nbUrl)) {
+      setTimeout(function () { respondXHR(self, JSON.stringify(mockFor(self.__nbUrl)), { contentType: 'application/json' }); }, 0);
       return;
     }
-    var text = JSON.stringify(mockFor(self.__nbUrl));
-    setTimeout(function () { respondXHR(self, text); }, 0);
+
+    var meta = lookupFixture(self.__nbMethod, self.__nbUrl);
+    if (meta) {
+      var body = (typeof meta.body === 'object') ? JSON.stringify(meta.body) : String(meta.body == null ? '{}' : meta.body);
+      setTimeout(function () { respondXHR(self, body, { contentType: meta.contentType || 'application/json', status: meta.status || 200, b64: !!meta.b64 }); }, 0);
+      return;
+    }
+    recordMissing('xhr', self.__nbUrl);
+    setTimeout(function () { respondXHR(self, JSON.stringify(ok({})), { contentType: 'application/json' }); }, 0);
   };
 
-  /* ---------- 5.5 保存 shim 的 XHR/fetch 版本，供 restore-shim.js 在 vip 脚本之后还原 ---------- */
-  /* 必须放在 XP.send / XP.open 等覆盖之后，这样保存的是 shim 自己的版本，而非原生。 */
-  window.__nbShimXHROpen = XP.open;
-  window.__nbShimXHRSend = XP.send;
-  window.__nbShimXHRSetHeader = XP.setRequestHeader;
-  window.__nbShimXHRGetAll = XP.getAllResponseHeaders;
-  window.__nbShimXHRGetOne = XP.getResponseHeader;
-  window.__nbShimFetch = window.fetch;
-
-  /* ---------- 6. 假登录态：cookie + storage ---------- */
+  /* ---------- 7. 假登录态：cookie + storage ---------- */
   try {
     document.cookie = 'nb_token=offline-token;path=/';
     document.cookie = 'uid=100001;path=/';
@@ -339,21 +349,19 @@
     localStorage.setItem('isLogin', '1');
   } catch (e) { }
 
-  /* ---------- 7. 杂项全局桩 ---------- */
+  /* ---------- 8. 杂项全局桩 ---------- */
   window.sendToAppMessage = window.sendToAppMessage || function () { };
   window._howxm = window._howxm || function () { };
   window.g_initialProps = window.g_initialProps || {};
   window.sa = window.sa || { init: noop, track: noop, login: noop, quick: noop, registerPage: noop, setProfile: noop };
-  function noop() { }
   window.sensors = window.sensors || window.sa;
 
-  /* ---------- 8. 屏蔽 Service Worker（离线壳自己就是本地） ---------- */
+  /* ---------- 9. 屏蔽 Service Worker（静态壳自己就是本地） ---------- */
   if (navigator.serviceWorker && navigator.serviceWorker.register) {
     navigator.serviceWorker.register = function () { return Promise.resolve({ scope: '/', unregister: function () { return Promise.resolve(true); } }); };
   }
 
-  /* ---------- 9. 静默 WebSocket ---------- */
-  var RawWS = window.WebSocket;
+  /* ---------- 10. 静默 WebSocket ---------- */
   window.WebSocket = function (url) {
     log('websocket blocked →', url);
     var o = { readyState: 3, close: noop, send: noop, addEventListener: noop, removeEventListener: noop };
@@ -362,7 +370,7 @@
   window.WebSocket.CONNECTING = 0; window.WebSocket.OPEN = 1;
   window.WebSocket.CLOSING = 2; window.WebSocket.CLOSED = 3;
 
-  /* ---------- 10. 音频解码守卫 ----------
+  /* ---------- 11. 音频解码守卫 ----------
    * soundjs 0.6.1 的 WebAudioLoader 会把 xhr 响应再用 new Blob([...]) 包一层，
    * 然后直接把 Blob 传给 decodeAudioData —— 而该 API 只接受 ArrayBuffer，
    * 于是抛 “parameter 1 is not of type 'ArrayBuffer'”（同步 TypeError，未被 soundjs 的
@@ -414,5 +422,5 @@
     log('decodeAudioData 守卫已装');
   })();
 
-  log('offline shim ready. 查看被拦请求: window.__nbShimHits');
+  log('offline shim ready (noserver). 被拦请求: window.__nbShimHits / 缺失接口: window.__nb_missing');
 })();
