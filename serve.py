@@ -18,12 +18,27 @@ from urllib.parse import urlparse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8010
-FALLBACK = "/404.html"  # 已在 noserver 分支创建，内容等同 index.html
+FALLBACK = "/404.html"  # 内容等同 index.html
+# 应用 index.html 硬编码 <base href="/NBChemistryOffline/">，故必须挂在此外缀下。
+PREFIX = "/NBChemistryOffline"
 
 
 class SPAHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=ROOT, **kwargs)
+
+    def translate_path(self, path):
+        # 去掉 /NBChemistryOffline 前缀，剩余部分按 ROOT 解析
+        if path.startswith(PREFIX):
+            path = path[len(PREFIX):] or "/"
+        return super().translate_path(path)
+
+    def end_headers(self):
+        # 离线壳会就地修改 umi.*.js（Vt 解密补丁），必须禁止浏览器缓存，
+        # 否则刷新后仍加载旧 bundle → 解密抛异常 → 登录链失败、未解锁。
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Pragma", "no-cache")
+        super().end_headers()
 
     def send_head(self):
         # 去掉 query，得到真实路径
@@ -55,8 +70,8 @@ class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 if __name__ == "__main__":
     os.chdir(ROOT)
     with ThreadingServer(("127.0.0.1", PORT), SPAHandler) as httpd:
-        print(f"nobook_chem_offline static server running at http://127.0.0.1:{PORT}/")
-        print(f"SPA fallback -> {FALLBACK}  (open http://127.0.0.1:{PORT}/chemical/new?moduleId=9 )")
+        print(f"nobook_chem_offline static server running at http://127.0.0.1:{PORT}{PREFIX}/")
+        print(f"SPA fallback -> {FALLBACK}  (open http://127.0.0.1:{PORT}{PREFIX}/chemical/new?moduleId=9 )")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

@@ -91,6 +91,13 @@
     }, 2000);  // 等 2s 让 dva app 先初始化
   })();
 
+  /* ---------- 1.9 占位 encrypt_data ----------
+   * 真正 encrypt_data 由服务端用 RSA 签名的随机 AES 密钥（MD5(getUniqueID())）加密，
+   * 离线无法复现合法密文。此处任意占位值即可：umi.5eade003.js 的解密函数 Vt 已打补丁——
+   * 当真实 AES 解密失败（离线必然失败）时回退返回离线 VIP JSON（含 vip_info 与
+   * 顶层 vip/app_resource_vip/channel_vip），使登录链 le.vip_info 命中、器材解锁。 */
+  var EMPTY_CIPHER = 'AAAAAAAAAAAAAAAAAAAAAA==';
+
   /* ---------- 2. 假用户：一个永不过期的本地 VIP ---------- */
   var FAKE_USER = {
     id: 100001,
@@ -126,6 +133,27 @@
   // 按 URL 关键字给不同的假数据
   function mockFor(url) {
     var u = String(url);
+
+    /* ★ 登录态判定的唯一来源：必须返回扁平对象（umi-request 不解包 {code,data} 信封），
+     *   且顶层带 auth_token + encrypt_data。否则 app 读 le.auth_token=undefined → 弹微信扫码框 →
+     *   二维码 canvas 未挂载 → getContext 崩溃。encrypt_data 为占位值即可，真正的 vip_info
+     *   由 umi.5eade003.js 的 Vt 补丁在解密失败时注入。 */
+    if (/login\/check|checkLogin/i.test(u)) {
+      var lc = {};
+      for (var _k in FAKE_USER) if (Object.prototype.hasOwnProperty.call(FAKE_USER, _k)) lc[_k] = FAKE_USER[_k];
+      lc.auth_token = 'offline-token';
+      lc.encrypt_data = EMPTY_CIPHER;
+      lc.schoolname = '本地';
+      lc.phone = '13800000000';
+      lc.phone_check = 1;
+      lc.tenant = 'nb';
+      lc.tenant_info = { id: 'nb', name: '本地' };
+      lc.customer_account_lock_status = 0;
+      HITS.push({ via: 'login-check-flat', url: u });
+      log('login/check → 扁平已登录响应 (auth_token + encrypt_data)');
+      return lc;
+    }
+
     if (/login|passport|checkLogin|userInfo|user_info|getUser|account/i.test(u)) {
       return ok({ user: FAKE_USER, userInfo: FAKE_USER, info: FAKE_USER, isLogin: true, is_login: 1 });
     }
@@ -421,6 +449,72 @@
     proto.decodeAudioData.__nbPatched = true;
     log('decodeAudioData 守卫已装');
   })();
+
+  /* ---------- 12. 强制 VIP 解锁（数据层，确定性兜底） ----------
+   * 即便 umi.5eade003.js 的 Vt 补丁未生效，这里也直接把 VIP 写进 Redux：
+   *   - loginModel.userInfo.vip_info：补齐初/高中 vip=1（器材解锁、VIP 角标）
+   *   - appModel.isVip = true：直接满足“实验触发立即开通”等所有 VIP 闸门
+   *   - localStorage.un_lock_vip=1：触发 bundle 内置的 isVip 强制覆盖
+   * 登录态有时会被后续 getUserInfo 覆盖，因此轮询一段时间反复确保。 */
+  function __nbEnsureVip() {
+    try {
+      var dva = window.getDvaApp && window.getDvaApp();
+      if (!dva || !dva._store) return false;
+      var store = dva._store, st = store.getState(), changed = false;
+      var ui = (st.loginModel && st.loginModel.userInfo) || {};
+      if (ui && (ui.user_id || ui.uid || ui.username || ui.auth_token)) {
+        var vi = ui.vip_info;
+        var need = !vi || !vi.CZHXNDZHTa75 || vi.CZHXNDZHTa75.vip !== 1 ||
+                   !vi.GZHXXV8IClkO || vi.GZHXXV8IClkO.vip !== 1;
+        if (need) {
+          var nv = Object.assign({}, vi);
+          nv.CZHXNDZHTa75 = { vip: 1, is_vip: 1, type: 1, vip_expire: 4102444800, expire: 4102444800 };
+          nv.GZHXXV8IClkO  = { vip: 1, is_vip: 1, type: 1, vip_expire: 4102444800, expire: 4102444800 };
+          store.dispatch({ type: 'loginModel/updateState', payload: { userInfo: Object.assign({}, ui, { vip_info: nv }) } });
+          changed = true;
+        }
+      }
+      if ((st.appModel || {}).isVip !== true) {
+        store.dispatch({ type: 'appModel/updateState', payload: { isVip: true } });
+        changed = true;
+      }
+      try { if (localStorage.getItem('un_lock_vip') !== '1') localStorage.setItem('un_lock_vip', '1'); } catch (e) {}
+      return changed;
+    } catch (e) { return false; }
+  }
+
+  (function __nbKeepVip() {
+    if (__nbEnsureVip()) log('VIP 强制注入/保持 (isVip=true)');
+    if (__nbKeepVip._n === undefined) __nbKeepVip._n = 0;
+    __nbKeepVip._n++;
+    if (__nbKeepVip._n < 120) setTimeout(__nbKeepVip, 500); // ~60s 反复确保
+  })();
+
+  /* ---------- 13. 控制台自检（即便 nb-vip-local.js 未加载也可用） ---------- */
+  function __nbVipState() {
+    try {
+      var dva = window.getDvaApp && window.getDvaApp();
+      if (!dva || !dva._store) return null;
+      return dva._store.getState();
+    } catch (e) { return null; }
+  }
+  window.__nbVip = {
+    check: function (gradeId) {
+      var st = __nbVipState(); if (!st) return false;
+      var pid = gradeId === 2 ? 'CZHXNDZHTa75' : 'GZHXXV8IClkO';
+      var info = st.loginModel && st.loginModel.userInfo && st.loginModel.userInfo.vip_info;
+      var v = info && info[pid];
+      return !!(v && v.vip === 1);
+    },
+    status: function () {
+      var st = __nbVipState();
+      if (!st) { console.log('%c[nb-vip]', 'color:#07a', 'store 未就绪'); return null; }
+      var j = this.check(2), s = this.check(3);
+      var appVip = !!(st.appModel && st.appModel.isVip);
+      console.log('%c[nb-vip]', 'color:#07a', '初中VIP:', j, ' 高中VIP:', s, ' appModel.isVip:', appVip);
+      return { junior: j, senior: s, appIsVip: appVip };
+    }
+  };
 
   log('offline shim ready (noserver). 被拦请求: window.__nbShimHits / 缺失接口: window.__nb_missing');
 })();
