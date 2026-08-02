@@ -36,10 +36,13 @@
 
   /* ---------- 1.4 根路径落地到化学实验（避免默认进 /console/templates/resource） ----------
    * NOBOOK 默认首页是 /console/templates/resource（实验模板资源库），访问根路径会被路由
-   * 重定向到它。这里在 umi 启动前，把"纯根路径访问"改写为化学实验深链：
-   *   <base>/        -> <base>/chemical/new?moduleId=9
-   * 仅在 base 之后的相对路由为空或仅 "/" 时改写；明确访问的其它路由（含 /console/...、
-   * /chemical/new...）一律不改写，避免循环与误伤。auth_key 由下方 1.5 追加。 */
+   * 重定向到它。这里在 umi 启动前，把"纯根路径访问"用 location.replace 真实导航到化学实验深链：
+   *   <base>        -> <base>chemical/new?moduleId=9
+   * 必须用 location.replace（而非 history.replaceState）：replaceState 不会通知 react-router，
+   * 一旦 umi 已挂载在资源库路由，再 replaceState 也无法让视图切到化学实验；location.replace
+   * 触发一次真实导航，umi 重新在化学实验路由挂载，等价于用户直接打开该深链（已验证可用）。
+   * 仅对"纯根访问"生效（兼容无/有尾斜杠两种入口）；明确访问的其它路由（含 /console/...、
+   * /chemical/new...）一律不动，避免循环与误伤。auth_key 由下方 1.5 追加。 */
   (function landingRedirect() {
     var baseEl = document.querySelector('base');
     var baseHref = (baseEl && baseEl.getAttribute('href')) || '/';
@@ -54,30 +57,22 @@
     }
     function toChemical() {
       var target = basePath + 'chemical/new?moduleId=9';
-      if ((location.pathname + location.search) !== target) {
-        try { history.replaceState(null, '', target); log('根路径落地 → ' + target); }
-        catch (e) { }
-      }
+      if ((location.pathname + location.search) === target) return;
+      try { log('根路径落地 → ' + target); location.replace(target); } catch (e) { }
     }
 
     // 仅当 pathname 位于本 base 之下、且相对路由为空或仅 "/" 时，视为"纯根访问"。
     // 兼容两种入口：mc-lhz.github.io/NBChemistryOffline  与  .../NBChemistryOffline/
-    // （GitHub Pages 对无斜杠的项目子路径用 404.html 兜底，pathname 保持无斜杠，原逻辑会漏匹配）
-    var isLanding = false;
+    // （GitHub Pages 对无斜杠的项目子路径用 404.html 兜底，pathname 保持无斜杠）
     var rel = relRoute();
-    if (rel === '' || rel === '/') { isLanding = true; toChemical(); }
+    if (rel === '' || rel === '/') { toChemical(); return; }
 
-    // 重断言：umi 启动后可能又把根路径/默认页改回资源库；落地场景在 ~3s 内反复纠正，
-    // 仅作用于"我们判定为纯根访问"的情况，不影响用户显式打开的其它深链。
-    if (isLanding) {
-      var n = 0;
-      (function reassert() {
-        var r = relRoute();
-        if (r === '' || r === '/' || (r && r.indexOf('console/templates/resource') === 0)) {
-          toChemical();
-        }
-        if (++n < 10) setTimeout(reassert, 300);
-      })();
+    // 兜底（极少触发）：若 umi 启动后把默认页指向资源库，纠正一次。
+    // 用 sessionStorage 防抖，避免任何可能的重定向循环。
+    try { if (sessionStorage.getItem('__nbLanded') === '1') return; } catch (e) {}
+    if (rel && rel.indexOf('console/templates/resource') === 0) {
+      try { sessionStorage.setItem('__nbLanded', '1'); } catch (e) {}
+      toChemical();
     }
   })();
 
