@@ -34,6 +34,31 @@
   window.__nb_howxm = { appId: '' };
   window.__nb_sentry = { enabled: '' };
 
+  /* ---------- 1.4 根路径落地到化学实验（避免默认进 /console/templates/resource） ----------
+   * NOBOOK 默认首页是 /console/templates/resource（实验模板资源库），访问根路径会被路由
+   * 重定向到它。这里在 umi 启动前，把"纯根路径访问"改写为化学实验深链：
+   *   <base>/        -> <base>/chemical/new?moduleId=9
+   * 仅在 base 之后的相对路由为空或仅 "/" 时改写；明确访问的其它路由（含 /console/...、
+   * /chemical/new...）一律不改写，避免循环与误伤。auth_key 由下方 1.5 追加。 */
+  (function landingRedirect() {
+    var baseEl = document.querySelector('base');
+    var baseHref = (baseEl && baseEl.getAttribute('href')) || '/';
+    var basePath;
+    try { basePath = new URL(baseHref, location.href).pathname; } catch (e) { basePath = '/'; }
+    if (basePath && !basePath.endsWith('/')) basePath += '/';
+
+    var p = location.pathname;
+    // 仅当 pathname 确实位于本 base 之下，且相对路由为空/根时，才视为"纯根访问"
+    var rel = (p.indexOf(basePath) === 0) ? p.slice(basePath.length) : null;
+    if (rel === '' || rel === '/') {
+      var target = basePath + 'chemical/new?moduleId=9';
+      if ((location.pathname + location.search) !== target) {
+        try { history.replaceState(null, '', target); log('根路径落地 → ' + target); }
+        catch (e) { }
+      }
+    }
+  })();
+
   /* ---------- 1.5 注入 auth_key（SDK 缺失时会跳过全部初始化导致点击无反应） ---------- */
   /* 根因: umi.js 中 sdkModel.parseAuthKeyFromURL 在 query.auth_key 缺失时 early return，
      导致整个交互系统(PointerManager等)不初始化 → 点击无反应。
