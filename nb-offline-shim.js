@@ -43,19 +43,41 @@
   (function landingRedirect() {
     var baseEl = document.querySelector('base');
     var baseHref = (baseEl && baseEl.getAttribute('href')) || '/';
-    var basePath;
+    var basePath; // 带尾斜杠，用于拼接目标与资源 base
     try { basePath = new URL(baseHref, location.href).pathname; } catch (e) { basePath = '/'; }
     if (basePath && !basePath.endsWith('/')) basePath += '/';
+    var baseRoot = basePath.replace(/\/+$/, ''); // 去尾斜杠，兼容用户访问 <base>（无斜杠）写法
 
-    var p = location.pathname;
-    // 仅当 pathname 确实位于本 base 之下，且相对路由为空/根时，才视为"纯根访问"
-    var rel = (p.indexOf(basePath) === 0) ? p.slice(basePath.length) : null;
-    if (rel === '' || rel === '/') {
+    function relRoute() {
+      var p = location.pathname;
+      return (baseRoot !== '' && p.indexOf(baseRoot) === 0) ? p.slice(baseRoot.length) : null;
+    }
+    function toChemical() {
       var target = basePath + 'chemical/new?moduleId=9';
       if ((location.pathname + location.search) !== target) {
         try { history.replaceState(null, '', target); log('根路径落地 → ' + target); }
         catch (e) { }
       }
+    }
+
+    // 仅当 pathname 位于本 base 之下、且相对路由为空或仅 "/" 时，视为"纯根访问"。
+    // 兼容两种入口：mc-lhz.github.io/NBChemistryOffline  与  .../NBChemistryOffline/
+    // （GitHub Pages 对无斜杠的项目子路径用 404.html 兜底，pathname 保持无斜杠，原逻辑会漏匹配）
+    var isLanding = false;
+    var rel = relRoute();
+    if (rel === '' || rel === '/') { isLanding = true; toChemical(); }
+
+    // 重断言：umi 启动后可能又把根路径/默认页改回资源库；落地场景在 ~3s 内反复纠正，
+    // 仅作用于"我们判定为纯根访问"的情况，不影响用户显式打开的其它深链。
+    if (isLanding) {
+      var n = 0;
+      (function reassert() {
+        var r = relRoute();
+        if (r === '' || r === '/' || (r && r.indexOf('console/templates/resource') === 0)) {
+          toChemical();
+        }
+        if (++n < 10) setTimeout(reassert, 300);
+      })();
     }
   })();
 
